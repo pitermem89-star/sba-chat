@@ -1,0 +1,72 @@
+name: Build TDLib
+
+# Собирает официальную библиотеку Telegram (TDLib) для Android из исходников tdlib/td.
+# Запускается один раз (около часа), результат кладётся в релиз tdlib-1.8.68,
+# оттуда его берёт обычная сборка приложения.
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - ".github/workflows/tdlib.yml"
+
+permissions:
+  contents: write
+
+env:
+  # Конкретный коммит официального репозитория https://github.com/tdlib/td (версия 1.8.68)
+  TDLIB_COMMIT: c15d3f5a5de6e3ba5839822c451152e5e18bb700
+
+jobs:
+  tdlib:
+    runs-on: ubuntu-latest
+    timeout-minutes: 330
+    steps:
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup /opt/hostedtoolcache/CodeQL || true
+          df -h /
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Install build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gperf php-cli perl make unzip curl
+
+      - name: Get official TDLib source
+        run: |
+          mkdir td && cd td
+          git init -q
+          git remote add origin https://github.com/tdlib/td.git
+          git fetch -q --depth 1 origin "$TDLIB_COMMIT"
+          git checkout -q FETCH_HEAD
+          git log -1 --format=%H
+
+      - name: Android SDK and OpenSSL
+        working-directory: td/example/android
+        run: |
+          # собираем только для современных телефонов (arm64 и armv7)
+          sed -i 's/for ABI in arm64-v8a armeabi-v7a x86_64 x86 ;/for ABI in arm64-v8a armeabi-v7a ;/' build-openssl.sh
+          ./fetch-sdk.sh
+          ./build-openssl.sh
+
+      - name: Build TDLib
+        working-directory: td/example/android
+        run: ./build-tdlib.sh '' '' '' '' 'Java' 24 'arm64-v8a armeabi-v7a'
+
+      - name: Show result
+        run: |
+          ls -la td/example/android/tdlib
+          unzip -l td/example/android/tdlib/tdlib.zip | grep -E "\.so|Client.java|TdApi.java"
+
+      - name: Publish to Releases
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: tdlib-1.8.68
+          name: TDLib 1.8.68 для Android
+          body: Библиотека Telegram, собранная из официального исходника. Нужна для сборки приложения.
+          files: td/example/android/tdlib/tdlib.zip
