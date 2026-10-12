@@ -309,16 +309,20 @@ class OverlayService : Service() {
     // ---------------------------------------------------------------- кружок
 
     private fun buildBubble() {
-        val size = dp(Style.BUBBLE_DP)
+        val sizeDp = prefs.bubbleSizeDp
+        val size = dp(sizeDp)
         val root = FrameLayout(this)
+
+        // 0% = квадрат, 100% = полный круг
+        val radiusPx = size / 2f * prefs.bubbleRoundPct / 100f
 
         val icon = TextView(this).apply {
             text = Style.BUBBLE_ICON
-            textSize = 24f
+            textSize = sizeDp * 0.43f
             gravity = Gravity.CENTER
             background = GradientDrawable().apply {
-                shape = GradientDrawable.OVAL
                 setColor(Style.accent)
+                cornerRadius = radiusPx
             }
         }
         root.addView(icon, FrameLayout.LayoutParams(size, size))
@@ -413,8 +417,9 @@ class OverlayService : Service() {
 
     private fun buildPanel() {
         val screenW = resources.displayMetrics.widthPixels
-        val w = minOf(dp(Style.PANEL_W_DP), screenW - dp(16))
-        val h = dp(Style.PANEL_H_DP)
+        val screenH = resources.displayMetrics.heightPixels
+        val w = minOf(dp(prefs.panelWidthDp), screenW - dp(16))
+        val h = minOf(dp(prefs.panelHeightDp), screenH - dp(48))
 
         val root = PanelView(this) { releaseFocus() }
         root.orientation = LinearLayout.VERTICAL

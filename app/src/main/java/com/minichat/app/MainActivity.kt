@@ -108,8 +108,23 @@ class MainActivity : Activity() {
         opacityLabel.text = "Видимость: ${prefs.opacity}%"
         col.addView(opacitySeek)
 
-        // ---- 4. запуск
-        col.addView(section("4. Запуск"))
+        // ---- 4. размеры и форма
+        col.addView(section("4. Размеры и форма"))
+        col.addView(
+            text(
+                "Если чат сейчас запущен, окно перезапустится, чтобы применить новое значение.",
+                13f, color = 0xFFB0B0C4.toInt(),
+            )
+        )
+        addSlider(col, "Ширина окна чата", 200, 420, prefs.panelWidthDp) { prefs.panelWidthDp = it }
+        addSlider(col, "Высота окна чата", 160, 560, prefs.panelHeightDp) { prefs.panelHeightDp = it }
+        addSlider(col, "Размер пузыря", 36, 96, prefs.bubbleSizeDp) { prefs.bubbleSizeDp = it }
+        addSlider(col, "Скругление пузыря (0 — квадрат, 100 — круг)", 0, 100, prefs.bubbleRoundPct, "%") {
+            prefs.bubbleRoundPct = it
+        }
+
+        // ---- 5. запуск
+        col.addView(section("5. Запуск"))
         statusText = text("", 13f, color = 0xFFB0B0C4.toInt())
         col.addView(statusText)
         col.addView(button("Разрешить показ поверх приложений") { openOverlaySettings() })
@@ -279,6 +294,35 @@ class MainActivity : Activity() {
     private fun stopChat() {
         stopService(Intent(this, OverlayService::class.java))
         statusText.postDelayed({ refreshStatus() }, 300)
+    }
+
+    /** Ползунок со значением от [lo] до [hi]. Значение сохраняется, когда палец отпущен. */
+    private fun addSlider(
+        col: LinearLayout,
+        title: String,
+        lo: Int,
+        hi: Int,
+        value: Int,
+        unit: String = "",
+        onSave: (Int) -> Unit,
+    ) {
+        val label = text("$title: $value$unit", 14f).apply { setPadding(0, dp(12), 0, dp(2)) }
+        col.addView(label)
+        val seek = SeekBar(this).apply {
+            max = hi - lo
+            progress = (value - lo).coerceIn(0, hi - lo)
+            setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+                override fun onProgressChanged(s: SeekBar?, p: Int, fromUser: Boolean) {
+                    label.text = "$title: ${p + lo}$unit"
+                }
+                override fun onStartTrackingTouch(s: SeekBar?) {}
+                override fun onStopTrackingTouch(s: SeekBar?) {
+                    onSave((s?.progress ?: 0) + lo)
+                    if (OverlayService.isRunning) launchService()
+                }
+            })
+        }
+        col.addView(seek)
     }
 
     // ------------------------------------------------------------ мелкие помощники для интерфейса

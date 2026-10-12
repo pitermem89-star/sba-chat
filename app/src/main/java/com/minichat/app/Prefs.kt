@@ -68,6 +68,26 @@ class Prefs(ctx: Context) {
         get() = sp.getInt("panelY", 160)
         set(v) { sp.edit().putInt("panelY", v).apply() }
 
+    /** Ширина окна чата в dp. */
+    var panelWidthDp: Int
+        get() = sp.getInt("panelWidthDp", Style.PANEL_W_DP)
+        set(v) { sp.edit().putInt("panelWidthDp", v).apply() }
+
+    /** Высота окна чата в dp. */
+    var panelHeightDp: Int
+        get() = sp.getInt("panelHeightDp", Style.PANEL_H_DP)
+        set(v) { sp.edit().putInt("panelHeightDp", v).apply() }
+
+    /** Размер свёрнутого пузыря в dp. */
+    var bubbleSizeDp: Int
+        get() = sp.getInt("bubbleSizeDp", Style.BUBBLE_DP)
+        set(v) { sp.edit().putInt("bubbleSizeDp", v).apply() }
+
+    /** Скругление пузыря: 0 = квадрат, 100 = полный круг. */
+    var bubbleRoundPct: Int
+        get() = sp.getInt("bubbleRoundPct", 100)
+        set(v) { sp.edit().putInt("bubbleRoundPct", v).apply() }
+
     /** Ник игрока (до 20 символов). Пусто, если ещё не задан. */
     fun cleanNick(): String = nick.trim().take(20)
 
