@@ -1,22 +1,51 @@
 package com.minichat.app
 
 import android.content.Context
+import org.json.JSONArray
+import org.json.JSONObject
+import java.security.MessageDigest
+
+/**
+ * Комната чата.
+ *  - открытая: войти может любой, кто знает название;
+ *  - закрытая: нужны название И пароль (без пароля комнату не найти).
+ */
+data class Room(val name: String, val isPrivate: Boolean, val password: String) {
+
+    /**
+     * Адрес комнаты на сервере. Это «отпечаток» названия (и пароля для закрытой комнаты),
+     * поэтому у закрытой комнаты другой пароль = другая комната.
+     */
+    fun topic(): String {
+        val raw = if (isPrivate) {
+            "private:" + name.lowercase() + "\n" + password
+        } else {
+            "open:" + name.lowercase()
+        }
+        val digest = MessageDigest.getInstance("SHA-256")
+            .digest(("minichat:$raw").toByteArray(Charsets.UTF_8))
+        return "mc" + digest.joinToString("") { "%02x".format(it) }.take(30)
+    }
+
+    fun sameAs(o: Room): Boolean =
+        isPrivate == o.isPrivate && name.equals(o.name, ignoreCase = true) && password == o.password
+
+    /** Как комната подписана в списках и в шапке чата. */
+    fun label(): String = (if (isPrivate) "🔒 " else "# ") + name
+}
 
 /** Сохранённые настройки приложения. */
 class Prefs(ctx: Context) {
     private val sp = ctx.getSharedPreferences("minichat", Context.MODE_PRIVATE)
 
-    var dbUrl: String
-        get() = sp.getString("dbUrl", "") ?: ""
-        set(v) { sp.edit().putString("dbUrl", v).apply() }
+    companion object {
+        /** Единый сервер для всех пользователей (бесплатный, без регистрации). */
+        const val SERVER = "https://ntfy.sh"
+    }
 
     var nick: String
         get() = sp.getString("nick", "") ?: ""
         set(v) { sp.edit().putString("nick", v).apply() }
-
-    var room: String
-        get() = sp.getString("room", "general") ?: "general"
-        set(v) { sp.edit().putString("room", v).apply() }
 
     /** Прозрачность окна чата, 30..100 (%) */
     var opacity: Int
@@ -39,20 +68,59 @@ class Prefs(ctx: Context) {
         get() = sp.getInt("panelY", 160)
         set(v) { sp.edit().putInt("panelY", v).apply() }
 
-    /** Ссылка на базу без пробелов и лишнего слэша в конце. Пусто, если не задана. */
-    fun cleanDbUrl(): String {
-        var u = dbUrl.trim()
-        if (u.isEmpty()) return ""
-        if (!u.startsWith("http://") && !u.startsWith("https://")) u = "https://$u"
-        return u.trimEnd('/')
-    }
-
-    /** Название комнаты без символов, которые Firebase не принимает. */
-    fun cleanRoom(): String {
-        val r = room.trim().lowercase().replace(Regex("[.\$#\\[\\]/\\s]+"), "_")
-        return if (r.isEmpty()) "general" else r.take(30)
-    }
-
     /** Ник игрока (до 20 символов). Пусто, если ещё не задан. */
     fun cleanNick(): String = nick.trim().take(20)
+
+    // ------------------------------------------------------------ комнаты
+
+    private fun toJson(r: Room): JSONObject =
+        JSONObject().put("n", r.name).put("p", r.isPrivate).put("w", r.password)
+
+    private fun fromJson(o: JSONObject): Room =
+        Room(o.optString("n", ""), o.optBoolean("p", false), o.optString("w", ""))
+
+    /** Все сохранённые комнаты (новые сверху). */
+    fun rooms(): MutableList<Room> {
+        val out = ArrayList<Room>()
+        try {
+            val arr = JSONArray(sp.getString("rooms", "[]") ?: "[]")
+            for (i in 0 until arr.length()) {
+                val r = fromJson(arr.getJSONObject(i))
+                if (r.name.isNotEmpty()) out.add(r)
+            }
+        } catch (_: Exception) {
+        }
+        return out
+    }
+
+    private fun saveRooms(list: List<Room>) {
+        val arr = JSONArray()
+        for (r in list) arr.put(toJson(r))
+        sp.edit().putString("rooms", arr.toString()).apply()
+    }
+
+    /** Комната, в которой сейчас находится игрок. Пусто, если ещё не выбрана. */
+    fun currentRoom(): Room? {
+        val s = sp.getString("current", null) ?: return null
+        return try {
+            val r = fromJson(JSONObject(s))
+            if (r.name.isEmpty()) null else r
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    /** Выбрать комнату (и запомнить её в списке, если её там не было). */
+    fun setCurrent(r: Room) {
+        val list = rooms()
+        if (list.none { it.sameAs(r) }) list.add(0, r)
+        saveRooms(list.take(30))
+        sp.edit().putString("current", toJson(r).toString()).apply()
+    }
+
+    fun removeRoom(r: Room) {
+        saveRooms(rooms().filterNot { it.sameAs(r) })
+        val cur = currentRoom()
+        if (cur != null && cur.sameAs(r)) sp.edit().remove("current").apply()
+    }
 }

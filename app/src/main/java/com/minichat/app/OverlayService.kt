@@ -68,6 +68,9 @@ class OverlayService : Service() {
     private val main = Handler(Looper.getMainLooper())
 
     private var client: ChatClient? = null
+
+    /** Номер текущего подключения. Сообщения от старых подключений (после смены комнаты) игнорируются. */
+    private var gen = 0
     private var nick = ""
 
     private var bubble: FrameLayout? = null
@@ -78,13 +81,25 @@ class OverlayService : Service() {
     private var panelParams: WindowManager.LayoutParams? = null
     private var listLayout: LinearLayout? = null
     private var scroll: ScrollView? = null
+    private var inputRow: LinearLayout? = null
     private var edit: EditText? = null
     private var statusView: TextView? = null
     private var titleView: TextView? = null
     private var sendBtn: TextView? = null
 
+    // экран выбора комнат
+    private var roomsScroll: ScrollView? = null
+    private var roomsList: LinearLayout? = null
+    private var newRoomName: EditText? = null
+    private var newRoomPass: EditText? = null
+    private var privToggle: TextView? = null
+    private var newIsPrivate = false
+
     /** true, пока в поле ввода пишется ник, а не сообщение */
     private var nickMode = false
+
+    /** true, пока показан экран выбора комнат */
+    private var roomsMode = false
 
     private var expanded = false
     private var focusable = false
@@ -106,9 +121,8 @@ class OverlayService : Service() {
             startForeground(NOTIF_ID, n)
         }
 
-        val base = prefs.cleanDbUrl()
-        if (!Settings.canDrawOverlays(this) || base.isEmpty()) {
-            Toast.makeText(this, "Не хватает разрешения или ссылки на базу", Toast.LENGTH_LONG).show()
+        if (!Settings.canDrawOverlays(this)) {
+            Toast.makeText(this, "Нет разрешения показывать поверх приложений", Toast.LENGTH_LONG).show()
             stopSelf()
             return
         }
@@ -118,41 +132,27 @@ class OverlayService : Service() {
         buildPanel()
         showBubble()
 
-        client = ChatClient(
-            base,
-            prefs.cleanRoom(),
-            onMessages = { list -> main.post { onIncoming(list) } },
-            onStatus = { s -> main.post { showStatus(s) } },
-        ).also {
-            it.pollMs = 4000
-            it.start()
-        }
+        if (prefs.currentRoom() != null) startClient()
 
-        // Ника ещё нет — сразу открываем окно и просим его ввести
-        if (nick.isEmpty()) {
+        // Нет ника или комнаты — сразу открываем окно и просим выбрать
+        if (nick.isEmpty() || prefs.currentRoom() == null) {
             expand()
-            main.postDelayed({ startNickEntry() }, 400)
+            main.postDelayed({
+                if (nick.isEmpty()) startNickEntry() else showRooms()
+            }, 400)
         }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (intent?.action == ACTION_STOP) {
             stopSelf()
-            return START_NOT_STICKY
-        }
-        // Если чат уже работает, а ник сменили в настройках — подхватываем новый
-        if (::prefs.isInitialized && !nickMode) {
-            val n = prefs.cleanNick()
-            if (n.isNotEmpty() && n != nick) {
-                nick = n
-                updateTitle()
-            }
         }
         return START_NOT_STICKY
     }
 
     override fun onDestroy() {
         isRunning = false
+        gen++
         client?.stop()
         main.removeCallbacksAndMessages(null)
         safeRemove(bubble)
@@ -213,6 +213,10 @@ class OverlayService : Service() {
             cornerRadius = dp(radiusDp).toFloat()
         }
 
+    private fun toast(s: String) {
+        Toast.makeText(this, s, Toast.LENGTH_SHORT).show()
+    }
+
     /** Делает так, чтобы окно можно было таскать пальцем за [handle]. Короткое касание — [onTap]. */
     private fun makeDraggable(
         handle: View,
@@ -252,6 +256,54 @@ class OverlayService : Service() {
                 else -> false
             }
         }
+    }
+
+    // ---------------------------------------------------------------- подключение к комнате
+
+    /** (Пере)подключаемся к выбранной комнате. */
+    private fun startClient() {
+        client?.stop()
+        client = null
+        val room = prefs.currentRoom() ?: return
+        val myGen = ++gen
+        historyLoaded = false
+        client = ChatClient(
+            Prefs.SERVER,
+            room.topic(),
+            onMessages = { list -> main.post { if (myGen == gen) onIncoming(list) } },
+            onStatus = { s -> main.post { if (myGen == gen) showStatus(s) } },
+        ).also { it.start() }
+    }
+
+    private fun switchRoom(room: Room) {
+        val cur = prefs.currentRoom()
+        if (cur != null && cur.sameAs(room) && client != null) {
+            hideRooms()
+            return
+        }
+        prefs.setCurrent(room)
+        listLayout?.removeAllViews()
+        unread = 0
+        updateBadge()
+        showStatus(null)
+        updateTitle()
+        hideRooms()
+        startClient()
+    }
+
+    private fun deleteRoom(r: Room) {
+        val cur = prefs.currentRoom()
+        val wasCurrent = cur != null && cur.sameAs(r)
+        prefs.removeRoom(r)
+        if (wasCurrent) {
+            gen++
+            client?.stop()
+            client = null
+            listLayout?.removeAllViews()
+            showStatus(null)
+            updateTitle()
+        }
+        buildRoomsContent()
     }
 
     // ---------------------------------------------------------------- кружок
@@ -328,6 +380,37 @@ class OverlayService : Service() {
 
     // ---------------------------------------------------------------- окно чата
 
+    private fun makeEdit(hintText: String, maxLen: Int): EditText =
+        EditText(this).apply {
+            hint = hintText
+            setHintTextColor(Style.hintColor)
+            setTextColor(Style.textColor)
+            textSize = Style.TEXT_SP
+            background = roundBg(Style.inputBg, 18)
+            setPadding(dp(14), dp(8), dp(14), dp(8))
+            setSingleLine(true)
+            imeOptions = EditorInfo.IME_ACTION_DONE
+            filters = arrayOf<InputFilter>(InputFilter.LengthFilter(maxLen))
+        }
+
+    /**
+     * Чтобы клавиатура работала в окне поверх приложений, окно должно уметь получать фокус.
+     * Обычно оно «не фокусируемое» (игра продолжает получать нажатия), а при касании поля — включаем фокус.
+     */
+    private fun attachFocus(et: EditText) {
+        et.setOnTouchListener { _, e ->
+            if (e.action == MotionEvent.ACTION_DOWN) setPanelFocusable(true)
+            if (e.action == MotionEvent.ACTION_UP) {
+                et.postDelayed({
+                    et.requestFocus()
+                    val imm = getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager
+                    imm.showSoftInput(et, 0)
+                }, 120)
+            }
+            false
+        }
+    }
+
     private fun buildPanel() {
         val screenW = resources.displayMetrics.widthPixels
         val w = minOf(dp(Style.PANEL_W_DP), screenW - dp(16))
@@ -348,7 +431,6 @@ class OverlayService : Service() {
             setPadding(dp(12), 0, dp(4), 0)
         }
         val title = TextView(this).apply {
-            text = "# " + prefs.cleanRoom()
             setTextColor(Style.textColor)
             typeface = Typeface.DEFAULT_BOLD
             textSize = 14f
@@ -368,9 +450,11 @@ class OverlayService : Service() {
                 setOnClickListener { onClick() }
             }
 
-        header.addView(headerButton("✎") { startNickEntry() }, LinearLayout.LayoutParams(dp(40), ViewGroup.LayoutParams.MATCH_PARENT))
-        header.addView(headerButton("—") { collapse() }, LinearLayout.LayoutParams(dp(40), ViewGroup.LayoutParams.MATCH_PARENT))
-        header.addView(headerButton("✕") { stopSelf() }, LinearLayout.LayoutParams(dp(40), ViewGroup.LayoutParams.MATCH_PARENT))
+        val bw = dp(36)
+        header.addView(headerButton("⇄") { toggleRooms() }, LinearLayout.LayoutParams(bw, ViewGroup.LayoutParams.MATCH_PARENT))
+        header.addView(headerButton("✎") { startNickEntry() }, LinearLayout.LayoutParams(bw, ViewGroup.LayoutParams.MATCH_PARENT))
+        header.addView(headerButton("—") { collapse() }, LinearLayout.LayoutParams(bw, ViewGroup.LayoutParams.MATCH_PARENT))
+        header.addView(headerButton("✕") { stopSelf() }, LinearLayout.LayoutParams(bw, ViewGroup.LayoutParams.MATCH_PARENT))
         root.addView(header, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(40)))
 
         // --- строка статуса (видна только при ошибках)
@@ -394,25 +478,68 @@ class OverlayService : Service() {
         listLayout = list
         scroll = sv
 
+        // --- экран выбора комнат (скрыт, пока не нажали ⇄)
+        val rl = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(12), dp(4), dp(12), dp(10))
+        }
+        val rs = ScrollView(this).apply {
+            isVerticalScrollBarEnabled = false
+            visibility = View.GONE
+        }
+        rs.addView(rl, ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+        root.addView(rs, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
+        roomsList = rl
+        roomsScroll = rs
+
+        // поля формы «создать или войти» (создаются один раз, чтобы не терять набранный текст)
+        val nameEt = makeEdit("Название комнаты", 30)
+        nameEt.inputType = InputType.TYPE_CLASS_TEXT
+        attachFocus(nameEt)
+        newRoomName = nameEt
+
+        val passEt = makeEdit("Пароль комнаты", 40)
+        passEt.inputType = InputType.TYPE_CLASS_TEXT or
+            InputType.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD or
+            InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
+        attachFocus(passEt)
+        newRoomPass = passEt
+
+        val doneListener = TextView.OnEditorActionListener { _, actionId, ev ->
+            if (actionId == EditorInfo.IME_ACTION_DONE ||
+                (ev != null && ev.keyCode == KeyEvent.KEYCODE_ENTER && ev.action == KeyEvent.ACTION_DOWN)
+            ) {
+                createRoomFromForm()
+                true
+            } else {
+                false
+            }
+        }
+        nameEt.setOnEditorActionListener(doneListener)
+        passEt.setOnEditorActionListener(doneListener)
+
+        val toggle = TextView(this).apply {
+            textSize = 14f
+            setTextColor(Style.textColor)
+            setPadding(0, dp(8), 0, dp(8))
+            setOnClickListener {
+                newIsPrivate = !newIsPrivate
+                updatePrivateUi()
+            }
+        }
+        privToggle = toggle
+        updatePrivateUi()
+
         // --- строка ввода
-        val inputRow = LinearLayout(this).apply {
+        val row = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
             setPadding(dp(8), dp(6), dp(8), dp(8))
         }
-        val et = EditText(this).apply {
-            hint = Style.INPUT_HINT
-            setHintTextColor(Style.hintColor)
-            setTextColor(Style.textColor)
-            textSize = Style.TEXT_SP
-            background = roundBg(Style.inputBg, 18)
-            setPadding(dp(14), dp(8), dp(14), dp(8))
-            setSingleLine(true)
-            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_CAP_SENTENCES
-            imeOptions = EditorInfo.IME_ACTION_SEND
-            filters = arrayOf<InputFilter>(InputFilter.LengthFilter(300))
-        }
-        inputRow.addView(et, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        val et = makeEdit(Style.INPUT_HINT, 300)
+        et.inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_CAP_SENTENCES
+        et.imeOptions = EditorInfo.IME_ACTION_SEND
+        row.addView(et, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
         edit = et
 
         val send = TextView(this).apply {
@@ -429,22 +556,11 @@ class OverlayService : Service() {
         val lp = LinearLayout.LayoutParams(dp(38), dp(38))
         lp.leftMargin = dp(6)
         sendBtn = send
-        inputRow.addView(send, lp)
-        root.addView(inputRow, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+        row.addView(send, lp)
+        root.addView(row, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+        inputRow = row
 
-        // Чтобы клавиатура работала в окне поверх приложений, окно должно уметь получать фокус.
-        // Обычно оно «не фокусируемое» (игра продолжает получать нажатия), а при касании поля — включаем фокус.
-        et.setOnTouchListener { _, e ->
-            if (e.action == MotionEvent.ACTION_DOWN) setPanelFocusable(true)
-            if (e.action == MotionEvent.ACTION_UP) {
-                et.postDelayed({
-                    et.requestFocus()
-                    val imm = getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager
-                    imm.showSoftInput(et, 0)
-                }, 120)
-            }
-            false
-        }
+        attachFocus(et)
         et.setOnEditorActionListener { _, actionId, ev ->
             if (actionId == EditorInfo.IME_ACTION_SEND ||
                 (ev != null && ev.keyCode == KeyEvent.KEYCODE_ENTER && ev.action == KeyEvent.ACTION_DOWN)
@@ -501,6 +617,8 @@ class OverlayService : Service() {
             imm.hideSoftInputFromWindow(et.windowToken, 0)
             et.clearFocus()
         }
+        newRoomName?.clearFocus()
+        newRoomPass?.clearFocus()
         setPanelFocusable(false)
     }
 
@@ -514,8 +632,6 @@ class OverlayService : Service() {
         if (v.parent == null) {
             try { wm.addView(v, panelParams) } catch (_: Exception) {}
         }
-        client?.pollMs = 2000
-        client?.wake()
     }
 
     private fun collapse() {
@@ -525,10 +641,167 @@ class OverlayService : Service() {
         safeRemove(panel)
         focusable = false
         showBubble()
-        client?.pollMs = 4000
     }
 
-    // ---------------------------------------------------------------- сообщения
+    // ---------------------------------------------------------------- экран комнат
+
+    private fun updateTitle() {
+        val t = titleView ?: return
+        val r = prefs.currentRoom()
+        val roomPart = if (r == null) "Выбери комнату" else r.label()
+        t.text = roomPart + if (nick.isNotEmpty()) "  ·  $nick" else ""
+    }
+
+    private fun updatePrivateUi() {
+        privToggle?.text =
+            if (newIsPrivate) "☑ Закрытая (нужен пароль)" else "☐ Закрытая (нужен пароль)"
+        newRoomPass?.visibility = if (newIsPrivate) View.VISIBLE else View.GONE
+    }
+
+    private fun toggleRooms() {
+        if (nick.isEmpty()) {
+            startNickEntry()
+            return
+        }
+        if (roomsMode) {
+            if (prefs.currentRoom() == null) {
+                toast("Выбери или создай комнату")
+                return
+            }
+            releaseFocus()
+            hideRooms()
+        } else {
+            showRooms()
+        }
+    }
+
+    private fun showRooms() {
+        if (!expanded) expand()
+        releaseFocus()
+        roomsMode = true
+        updatePrivateUi()
+        buildRoomsContent()
+        scroll?.visibility = View.GONE
+        inputRow?.visibility = View.GONE
+        roomsScroll?.visibility = View.VISIBLE
+    }
+
+    private fun hideRooms() {
+        roomsMode = false
+        roomsScroll?.visibility = View.GONE
+        scroll?.visibility = View.VISIBLE
+        inputRow?.visibility = View.VISIBLE
+        scroll?.post { scroll?.fullScroll(View.FOCUS_DOWN) }
+    }
+
+    private fun label(s: String): TextView =
+        TextView(this).apply {
+            text = s
+            textSize = 12f
+            setTextColor(Style.hintColor)
+            typeface = Typeface.DEFAULT_BOLD
+            setPadding(0, dp(10), 0, dp(4))
+        }
+
+    private fun topMargin(dpTop: Int): LinearLayout.LayoutParams =
+        LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
+        ).apply { topMargin = dp(dpTop) }
+
+    /** Заново наполняет экран комнат: список сохранённых комнат и форма «создать или войти». */
+    private fun buildRoomsContent() {
+        val rl = roomsList ?: return
+        val nameEt = newRoomName ?: return
+        val passEt = newRoomPass ?: return
+        val toggle = privToggle ?: return
+
+        rl.removeAllViews()
+        val current = prefs.currentRoom()
+        val saved = prefs.rooms()
+
+        rl.addView(label("МОИ КОМНАТЫ"))
+        if (saved.isEmpty()) {
+            rl.addView(TextView(this).apply {
+                text = "Пока пусто — создай комнату ниже."
+                textSize = 13f
+                setTextColor(Style.hintColor)
+            })
+        }
+        for (r in saved) {
+            val isCur = current != null && current.sameAs(r)
+            val rowLayout = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+            }
+            val nameTv = TextView(this).apply {
+                text = (if (isCur) "✓ " else "") + r.label()
+                textSize = 14f
+                setTextColor(if (isCur) Style.accent else Style.textColor)
+                typeface = if (isCur) Typeface.DEFAULT_BOLD else Typeface.DEFAULT
+                maxLines = 1
+                ellipsize = TextUtils.TruncateAt.END
+                background = roundBg(Style.inputBg, 10)
+                setPadding(dp(12), dp(9), dp(12), dp(9))
+                setOnClickListener { switchRoom(r) }
+            }
+            rowLayout.addView(nameTv, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+            val del = TextView(this).apply {
+                text = "🗑"
+                textSize = 16f
+                gravity = Gravity.CENTER
+                setOnClickListener { deleteRoom(r) }
+            }
+            rowLayout.addView(del, LinearLayout.LayoutParams(dp(40), dp(36)))
+            rl.addView(rowLayout, topMargin(4))
+        }
+
+        rl.addView(label("СОЗДАТЬ ИЛИ ВОЙТИ"))
+        rl.addView(nameEt, topMargin(2))
+        rl.addView(toggle, topMargin(2))
+        rl.addView(passEt, topMargin(0))
+
+        val go = TextView(this).apply {
+            text = "Создать / войти"
+            textSize = 14f
+            gravity = Gravity.CENTER
+            setTextColor(Color.WHITE)
+            typeface = Typeface.DEFAULT_BOLD
+            background = roundBg(Style.accent, 18)
+            setPadding(dp(12), dp(10), dp(12), dp(10))
+            setOnClickListener { createRoomFromForm() }
+        }
+        rl.addView(go, topMargin(8))
+
+        rl.addView(TextView(this).apply {
+            text = "Открытая: войдёт любой, кто знает название. " +
+                "Закрытая: нужны и название, и пароль."
+            textSize = 12f
+            setTextColor(Style.hintColor)
+            setPadding(0, dp(8), 0, 0)
+        })
+    }
+
+    private fun createRoomFromForm() {
+        val nameEt = newRoomName ?: return
+        val passEt = newRoomPass ?: return
+        val name = nameEt.text.toString().trim().take(30)
+        val pass = passEt.text.toString().trim().take(40)
+        if (name.isEmpty()) {
+            toast("Введи название комнаты")
+            return
+        }
+        if (newIsPrivate && pass.isEmpty()) {
+            toast("Для закрытой комнаты нужен пароль")
+            return
+        }
+        val room = Room(name, newIsPrivate, if (newIsPrivate) pass else "")
+        nameEt.setText("")
+        passEt.setText("")
+        releaseFocus()
+        switchRoom(room)
+    }
+
+    // ---------------------------------------------------------------- сообщения и ник
 
     private fun sendCurrent() {
         val et = edit ?: return
@@ -537,7 +810,7 @@ class OverlayService : Service() {
         if (nickMode) {
             if (text.isEmpty()) {
                 if (nick.isEmpty()) {
-                    Toast.makeText(this, "Сначала введи ник", Toast.LENGTH_SHORT).show()
+                    toast("Сначала введи ник")
                     return
                 }
                 releaseFocus() // ник уже есть, пустое поле = отмена смены
@@ -548,25 +821,28 @@ class OverlayService : Service() {
             updateTitle()
             finishNickEntry()
             releaseFocus()
+            if (prefs.currentRoom() == null) showRooms()
             return
         }
 
         if (text.isNotEmpty()) {
-            client?.send(nick, text)
+            val c = client
+            if (c == null) {
+                toast("Сначала выбери комнату")
+                showRooms()
+                return
+            }
+            c.send(nick, text)
             et.setText("")
         }
         releaseFocus()
-    }
-
-    private fun updateTitle() {
-        val t = titleView ?: return
-        t.text = "# " + prefs.cleanRoom() + if (nick.isNotEmpty()) "  ·  $nick" else ""
     }
 
     /** Поле ввода временно превращается в поле для ника (первый запуск или кнопка ✎). */
     private fun startNickEntry() {
         val et = edit ?: return
         if (!expanded) expand()
+        if (roomsMode) hideRooms()
         nickMode = true
         et.hint = if (nick.isEmpty()) "Сначала введи свой ник…" else "Новый ник…"
         et.filters = arrayOf<InputFilter>(InputFilter.LengthFilter(20))

@@ -1,18 +1,18 @@
 package com.minichat.app
 
 import android.app.Activity
-import android.content.ClipData
-import android.content.ClipboardManager
-import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Color
+import android.graphics.Typeface
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.provider.Settings
 import android.text.InputType
+import android.text.TextUtils
 import android.view.Gravity
+import android.view.View
 import android.view.ViewGroup
 import android.widget.Button
 import android.widget.EditText
@@ -22,34 +22,20 @@ import android.widget.SeekBar
 import android.widget.TextView
 import android.widget.Toast
 
-/** Экран настроек: ссылка на базу, ник, комната, прозрачность и кнопки запуска. */
+/** Экран настроек: ник, комнаты, прозрачность и кнопки запуска. */
 class MainActivity : Activity() {
 
-    companion object {
-        private val FIREBASE_RULES = """{
-  "rules": {
-    "rooms": {
-      "${'$'}room": {
-        "messages": {
-          ".read": true,
-          ".write": true,
-          "${'$'}id": {
-            ".validate": "newData.hasChildren(['n','t','ts']) && newData.child('n').isString() && newData.child('n').val().length <= 20 && newData.child('t').isString() && newData.child('t').val().length <= 300"
-          }
-        }
-      }
-    }
-  }
-}"""
-    }
-
     private lateinit var prefs: Prefs
-    private lateinit var urlEdit: EditText
     private lateinit var nickEdit: EditText
-    private lateinit var roomEdit: EditText
+    private lateinit var roomsBox: LinearLayout
+    private lateinit var roomNameEdit: EditText
+    private lateinit var roomPassEdit: EditText
+    private lateinit var privToggle: TextView
     private lateinit var opacityLabel: TextView
     private lateinit var opacitySeek: SeekBar
     private lateinit var statusText: TextView
+
+    private var newPrivate = false
 
     private fun dp(v: Int) = (v * resources.displayMetrics.density).toInt()
 
@@ -63,27 +49,48 @@ class MainActivity : Activity() {
         }
 
         col.addView(text("Мини-чат", 26f, bold = true))
-        col.addView(text("Чат поверх других приложений и игр. Без фильтров слов.", 14f, color = 0xFFB0B0C4.toInt()))
+        col.addView(text("Чат поверх других приложений и игр. Без фильтров слов. Ничего настраивать не нужно: сервер уже встроен.", 14f, color = 0xFFB0B0C4.toInt()))
 
-        col.addView(section("1. База данных (бесплатный Firebase)"))
+        // ---- 1. ник
+        col.addView(section("1. Ник"))
+        nickEdit = field("Твой ник — обязательно (до 20 символов)", prefs.nick)
+        col.addView(nickEdit)
+        col.addView(text("Ник можно сменить потом: кнопка ✎ в окне чата или здесь.", 13f, color = 0xFFB0B0C4.toInt()))
+
+        // ---- 2. комнаты
+        col.addView(section("2. Комнаты"))
         col.addView(
             text(
-                "Создай проект на console.firebase.google.com → Build → Realtime Database → Create. " +
-                    "Скопируй ссылку вида https://…firebaseio.com и вставь сюда. " +
-                    "Потом открой вкладку Rules, вставь правила (кнопка ниже копирует их) и нажми Publish.",
+                "Открытая комната: нужно только название, войдёт любой, кто его знает. " +
+                    "Закрытая: нужны название и пароль, без пароля туда не попасть.",
                 13f, color = 0xFFB0B0C4.toInt(),
             )
         )
-        urlEdit = field("https://твой-проект-default-rtdb.firebaseio.com", prefs.dbUrl, InputType.TYPE_TEXT_VARIATION_URI)
-        col.addView(urlEdit)
-        col.addView(button("Скопировать правила для Firebase") { copyRules() })
+        roomsBox = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        col.addView(roomsBox)
 
-        col.addView(section("2. Ник и комната"))
-        nickEdit = field("Ник — обязательно (до 20 символов)", prefs.nick)
-        col.addView(nickEdit)
-        roomEdit = field("Комната (одинаковая у всех, кто общается)", prefs.room)
-        col.addView(roomEdit)
+        col.addView(text("Создать комнату или войти в чужую", 14f, bold = true).apply {
+            setPadding(0, dp(16), 0, dp(2))
+        })
+        roomNameEdit = field("Название комнаты", "")
+        col.addView(roomNameEdit)
 
+        privToggle = text("", 15f).apply {
+            setPadding(0, dp(12), 0, dp(4))
+            setOnClickListener {
+                newPrivate = !newPrivate
+                updatePrivateUi()
+            }
+        }
+        col.addView(privToggle)
+
+        roomPassEdit = field("Пароль комнаты", "", InputType.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD)
+        col.addView(roomPassEdit)
+        updatePrivateUi()
+
+        col.addView(button("Создать / войти", primary = true) { createRoom() })
+
+        // ---- 3. прозрачность
         col.addView(section("3. Прозрачность окна"))
         opacityLabel = text("", 14f)
         col.addView(opacityLabel)
@@ -101,6 +108,7 @@ class MainActivity : Activity() {
         opacityLabel.text = "Видимость: ${prefs.opacity}%"
         col.addView(opacitySeek)
 
+        // ---- 4. запуск
         col.addView(section("4. Запуск"))
         statusText = text("", 13f, color = 0xFFB0B0C4.toInt())
         col.addView(statusText)
@@ -112,10 +120,13 @@ class MainActivity : Activity() {
         sv.setBackgroundColor(0xFF14141C.toInt())
         sv.addView(col, ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
         setContentView(sv)
+
+        renderRooms()
     }
 
     override fun onResume() {
         super.onResume()
+        renderRooms()
         refreshStatus()
     }
 
@@ -124,19 +135,105 @@ class MainActivity : Activity() {
         saveFields()
     }
 
+    // ------------------------------------------------------------ комнаты
+
+    private fun updatePrivateUi() {
+        privToggle.text =
+            if (newPrivate) "☑ Закрытая комната (нужен пароль)" else "☐ Закрытая комната (нужен пароль)"
+        roomPassEdit.visibility = if (newPrivate) View.VISIBLE else View.GONE
+    }
+
+    /** Список сохранённых комнат. Нажатие на название — выбрать комнату. */
+    private fun renderRooms() {
+        roomsBox.removeAllViews()
+        val current = prefs.currentRoom()
+        val saved = prefs.rooms()
+
+        if (saved.isEmpty()) {
+            roomsBox.addView(text("Комнат пока нет — создай первую ниже.", 13f, color = 0xFFB0B0C4.toInt()))
+            return
+        }
+        for (r in saved) {
+            val isCur = current != null && current.sameAs(r)
+            val row = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+            }
+            val nameTv = TextView(this).apply {
+                text = (if (isCur) "✓ " else "") + r.label()
+                textSize = 16f
+                setTextColor(if (isCur) 0xFF4C8DFF.toInt() else Color.WHITE)
+                typeface = if (isCur) Typeface.DEFAULT_BOLD else Typeface.DEFAULT
+                maxLines = 1
+                ellipsize = TextUtils.TruncateAt.END
+                setBackgroundColor(0xFF22222E.toInt())
+                setPadding(dp(14), dp(12), dp(14), dp(12))
+                setOnClickListener { selectRoom(r) }
+            }
+            row.addView(nameTv, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+            val del = TextView(this).apply {
+                text = "🗑"
+                textSize = 20f
+                gravity = Gravity.CENTER
+                setOnClickListener { deleteRoom(r) }
+            }
+            row.addView(del, LinearLayout.LayoutParams(dp(48), dp(44)))
+            roomsBox.addView(row, LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
+            ).apply { topMargin = dp(8) })
+        }
+    }
+
+    private fun selectRoom(r: Room) {
+        prefs.setCurrent(r)
+        renderRooms()
+        if (OverlayService.isRunning) {
+            launchService()
+            Toast.makeText(this, "Переключено: ${r.label()}", Toast.LENGTH_SHORT).show()
+        } else {
+            Toast.makeText(this, "Выбрано: ${r.label()}. Нажми «Запустить чат»", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    private fun deleteRoom(r: Room) {
+        val cur = prefs.currentRoom()
+        val wasCurrent = cur != null && cur.sameAs(r)
+        prefs.removeRoom(r)
+        renderRooms()
+        if (wasCurrent && OverlayService.isRunning) launchService() // окно чата предложит выбрать другую
+    }
+
+    private fun createRoom() {
+        val name = roomNameEdit.text.toString().trim().take(30)
+        val pass = roomPassEdit.text.toString().trim().take(40)
+        if (name.isEmpty()) {
+            Toast.makeText(this, "Введи название комнаты", Toast.LENGTH_LONG).show()
+            roomNameEdit.requestFocus()
+            return
+        }
+        if (newPrivate && pass.isEmpty()) {
+            Toast.makeText(this, "Для закрытой комнаты нужен пароль", Toast.LENGTH_LONG).show()
+            roomPassEdit.requestFocus()
+            return
+        }
+        val room = Room(name, newPrivate, if (newPrivate) pass else "")
+        roomNameEdit.setText("")
+        roomPassEdit.setText("")
+        selectRoom(room)
+    }
+
     // ------------------------------------------------------------ действия
 
     private fun saveFields() {
-        prefs.dbUrl = urlEdit.text.toString().trim()
         prefs.nick = nickEdit.text.toString().trim()
-        prefs.room = roomEdit.text.toString().trim().ifEmpty { "general" }
         prefs.opacity = opacitySeek.progress + 30
     }
 
     private fun refreshStatus() {
         val perm = if (Settings.canDrawOverlays(this)) "разрешение есть ✅" else "разрешения нет ❌"
         val run = if (OverlayService.isRunning) "работает" else "выключен"
-        statusText.text = "Поверх приложений: $perm\nЧат: $run"
+        val room = prefs.currentRoom()?.label() ?: "не выбрана"
+        statusText.text = "Поверх приложений: $perm\nЧат: $run\nКомната: $room"
     }
 
     private fun openOverlaySettings() {
@@ -145,10 +242,12 @@ class MainActivity : Activity() {
         )
     }
 
-    private fun copyRules() {
-        val cm = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-        cm.setPrimaryClip(ClipData.newPlainText("Firebase rules", FIREBASE_RULES))
-        Toast.makeText(this, "Правила скопированы — вставь их во вкладке Rules", Toast.LENGTH_LONG).show()
+    /** Перезапускает окно чата, чтобы оно подхватило новый ник, комнату и прозрачность. */
+    private fun launchService() {
+        saveFields()
+        stopService(Intent(this, OverlayService::class.java))
+        val i = Intent(this, OverlayService::class.java)
+        if (Build.VERSION.SDK_INT >= 26) startForegroundService(i) else startService(i)
     }
 
     private fun startChat() {
@@ -158,8 +257,8 @@ class MainActivity : Activity() {
             nickEdit.requestFocus()
             return
         }
-        if (prefs.cleanDbUrl().isEmpty()) {
-            Toast.makeText(this, "Сначала вставь ссылку на базу данных", Toast.LENGTH_LONG).show()
+        if (prefs.currentRoom() == null) {
+            Toast.makeText(this, "Выбери комнату или создай новую", Toast.LENGTH_LONG).show()
             return
         }
         if (!Settings.canDrawOverlays(this)) {
@@ -172,8 +271,7 @@ class MainActivity : Activity() {
         ) {
             requestPermissions(arrayOf(android.Manifest.permission.POST_NOTIFICATIONS), 1)
         }
-        val i = Intent(this, OverlayService::class.java)
-        if (Build.VERSION.SDK_INT >= 26) startForegroundService(i) else startService(i)
+        launchService()
         Toast.makeText(this, "Чат запущен. Открывай игру — кружок 💬 будет поверх", Toast.LENGTH_LONG).show()
         moveTaskToBack(true)
     }
@@ -190,7 +288,7 @@ class MainActivity : Activity() {
             text = s
             textSize = size
             setTextColor(color)
-            if (bold) setTypeface(typeface, android.graphics.Typeface.BOLD)
+            if (bold) setTypeface(typeface, Typeface.BOLD)
             setPadding(0, dp(4), 0, dp(4))
         }
 
