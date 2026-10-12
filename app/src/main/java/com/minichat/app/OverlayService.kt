@@ -16,6 +16,7 @@ import android.os.Build
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
+import android.os.SystemClock
 import android.provider.Settings
 import android.text.InputFilter
 import android.text.InputType
@@ -101,6 +102,18 @@ class OverlayService : Service() {
     /** true, пока показан экран выбора комнат */
     private var roomsMode = false
 
+    // крестики-нолики
+    private val ttt = TttSession()
+    private var gameScroll: ScrollView? = null
+    private var gameBox: LinearLayout? = null
+
+    /** true, пока показан экран игры */
+    private var gameMode = false
+
+    /** Чёрный экран проигравшего (виден только пока он «ищет») */
+    private var blackout: FrameLayout? = null
+    private val blackoutExit = Runnable { endBlackout() }
+
     private var expanded = false
     private var focusable = false
     private var historyLoaded = false
@@ -157,6 +170,7 @@ class OverlayService : Service() {
         main.removeCallbacksAndMessages(null)
         safeRemove(bubble)
         safeRemove(panel)
+        safeRemove(blackout)
         super.onDestroy()
     }
 
@@ -282,6 +296,8 @@ class OverlayService : Service() {
             return
         }
         prefs.setCurrent(room)
+        ttt.reset()
+        if (gameMode) hideGame()
         listLayout?.removeAllViews()
         unread = 0
         updateBadge()
@@ -296,6 +312,8 @@ class OverlayService : Service() {
         val wasCurrent = cur != null && cur.sameAs(r)
         prefs.removeRoom(r)
         if (wasCurrent) {
+            ttt.reset()
+            if (gameMode) hideGame()
             gen++
             client?.stop()
             client = null
@@ -497,6 +515,20 @@ class OverlayService : Service() {
         roomsList = rl
         roomsScroll = rs
 
+        // --- экран игры «крестики-нолики» (скрыт, пока не нажали 🎮)
+        val gb = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(12), dp(8), dp(12), dp(10))
+        }
+        val gs = ScrollView(this).apply {
+            isVerticalScrollBarEnabled = false
+            visibility = View.GONE
+        }
+        gs.addView(gb, ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+        root.addView(gs, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
+        gameBox = gb
+        gameScroll = gs
+
         // поля формы «создать или войти» (создаются один раз, чтобы не терять набранный текст)
         val nameEt = makeEdit("Название комнаты", 30)
         nameEt.inputType = InputType.TYPE_CLASS_TEXT
@@ -544,6 +576,14 @@ class OverlayService : Service() {
         val et = makeEdit(Style.INPUT_HINT, 300)
         et.inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_CAP_SENTENCES
         et.imeOptions = EditorInfo.IME_ACTION_SEND
+
+        val gameBtn = TextView(this).apply {
+            text = "🎮"
+            textSize = 18f
+            gravity = Gravity.CENTER
+            setOnClickListener { toggleGame() }
+        }
+        row.addView(gameBtn, LinearLayout.LayoutParams(dp(34), dp(38)))
         row.addView(et, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
         edit = et
 
@@ -683,6 +723,10 @@ class OverlayService : Service() {
     private fun showRooms() {
         if (!expanded) expand()
         releaseFocus()
+        if (gameMode) {
+            gameMode = false
+            gameScroll?.visibility = View.GONE
+        }
         roomsMode = true
         updatePrivateUi()
         buildRoomsContent()
@@ -848,6 +892,7 @@ class OverlayService : Service() {
         val et = edit ?: return
         if (!expanded) expand()
         if (roomsMode) hideRooms()
+        if (gameMode) hideGame()
         nickMode = true
         et.hint = if (nick.isEmpty()) "Сначала введи свой ник…" else "Новый ник…"
         et.filters = arrayOf<InputFilter>(InputFilter.LengthFilter(20))
@@ -872,11 +917,334 @@ class OverlayService : Service() {
         sendBtn?.text = "➤"
     }
 
+    // ---------------------------------------------------------------- крестики-нолики
+
+    private fun mmss(sec: Int): String = "%d:%02d".format(sec / 60, sec % 60)
+
+    private fun newGameId(): String =
+        java.util.UUID.randomUUID().toString().replace("-", "").take(8)
+
+    private fun toggleGame() {
+        if (nick.isEmpty()) {
+            startNickEntry()
+            return
+        }
+        if (client == null) {
+            toast("Сначала выбери комнату")
+            showRooms()
+            return
+        }
+        if (gameMode) {
+            releaseFocus()
+            hideGame()
+        } else {
+            showGame()
+        }
+    }
+
+    private fun showGame() {
+        if (!expanded) expand()
+        releaseFocus()
+        if (roomsMode) {
+            roomsMode = false
+            roomsScroll?.visibility = View.GONE
+        }
+        gameMode = true
+        scroll?.visibility = View.GONE
+        inputRow?.visibility = View.GONE
+        gameScroll?.visibility = View.VISIBLE
+        renderGame()
+    }
+
+    private fun hideGame() {
+        gameMode = false
+        gameScroll?.visibility = View.GONE
+        scroll?.visibility = View.VISIBLE
+        inputRow?.visibility = View.VISIBLE
+        scroll?.post { scroll?.fullScroll(View.FOCUS_DOWN) }
+    }
+
+    /** Отправить игровое событие всем в комнате. Экран обновится, когда событие вернётся с сервера. */
+    private fun sendGame(type: String, gid: String, cell: Int = -1) {
+        val c = client
+        if (c == null) {
+            toast("Сначала выбери комнату")
+            return
+        }
+        c.send(nick, TttProto.encode(type, gid, prefs.playerId, cell))
+    }
+
+    private fun gameText(s: String, size: Float, color: Int, bold: Boolean = false): TextView =
+        TextView(this).apply {
+            text = s
+            textSize = size
+            setTextColor(color)
+            if (bold) typeface = Typeface.DEFAULT_BOLD
+            setPadding(0, dp(4), 0, dp(4))
+        }
+
+    private fun gameButton(label: String, primary: Boolean = true, onClick: () -> Unit): TextView =
+        TextView(this).apply {
+            text = label
+            textSize = 14f
+            gravity = Gravity.CENTER
+            setTextColor(Color.WHITE)
+            typeface = Typeface.DEFAULT_BOLD
+            background = roundBg(if (primary) Style.accent else Style.inputBg, 18)
+            setPadding(dp(12), dp(10), dp(12), dp(10))
+            layoutParams = topMargin(8)
+            setOnClickListener { onClick() }
+        }
+
+    private fun statusLine(g: TttGame, me: String): String {
+        val xn = g.x.nick
+        val on = g.o?.nick ?: "?"
+        return when (g.result) {
+            'X' -> "Победил $xn (✕). $on ищет!"
+            'O' -> "Победил $on (○). $xn ищет!"
+            'D' -> "Ничья! Сыграйте ещё."
+            'A' -> "Игра прервана."
+            else -> {
+                val cur = g.currentPlayer()
+                val sign = if (g.turn == 'X') "✕" else "○"
+                if (cur?.id == me) "Твой ход ($sign)" else "Ходит ${cur?.nick ?: "?"} ($sign)"
+            }
+        }
+    }
+
+    private fun boardView(g: TttGame, me: String): LinearLayout {
+        val canMove = g.isRunning && g.currentPlayer()?.id == me
+        val colLayout = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        for (r in 0..2) {
+            val rowLayout = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+            for (c in 0..2) {
+                val i = r * 3 + c
+                val ch = g.board[i]
+                val cell = TextView(this).apply {
+                    text = when (ch) {
+                        'X' -> "✕"
+                        'O' -> "○"
+                        else -> ""
+                    }
+                    textSize = 22f
+                    gravity = Gravity.CENTER
+                    typeface = Typeface.DEFAULT_BOLD
+                    setTextColor(if (ch == 'X') Style.gameX else Style.gameO)
+                    background = roundBg(Style.inputBg, 8)
+                    if (canMove && ch == ' ') setOnClickListener { sendGame("mv", g.id, i) }
+                }
+                val lp = LinearLayout.LayoutParams(0, dp(46), 1f)
+                lp.setMargins(dp(2), dp(2), dp(2), dp(2))
+                rowLayout.addView(cell, lp)
+            }
+            colLayout.addView(
+                rowLayout,
+                LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT),
+            )
+        }
+        return colLayout
+    }
+
+    private fun renderGame() {
+        val box = gameBox ?: return
+        box.removeAllViews()
+        val me = prefs.playerId
+        val g = ttt.game
+
+        box.addView(gameButton("← В чат", primary = false) {
+            releaseFocus()
+            hideGame()
+        })
+        box.addView(gameText("Крестики-нолики", 16f, Style.textColor, bold = true))
+        box.addView(
+            gameText(
+                "Проигравший ищет: у него экран темнеет на ${mmss(Style.BLACKOUT_SEC)}.",
+                12f, Style.hintColor,
+            )
+        )
+
+        when {
+            g == null -> {
+                box.addView(gameText("Сейчас никто не играет.", 14f, Style.textColor))
+                box.addView(gameButton("Предложить игру") { sendGame("inv", newGameId()) })
+            }
+            g.isOpen -> {
+                if (g.x.id == me) {
+                    box.addView(gameText("Ждём соперника… Ты играешь за ✕.", 14f, Style.textColor))
+                    box.addView(gameButton("Отменить") { sendGame("end", g.id) })
+                } else {
+                    box.addView(gameText("${g.x.nick} предлагает сыграть.", 14f, Style.textColor))
+                    box.addView(gameButton("Принять (ты будешь ○)") { sendGame("acc", g.id) })
+                }
+            }
+            else -> {
+                box.addView(gameText("${g.x.nick} ✕  против  ${g.o?.nick ?: "?"} ○", 13f, Style.hintColor))
+                box.addView(boardView(g, me))
+                box.addView(gameText(statusLine(g, me), 14f, Style.textColor, bold = true))
+                val iPlay = g.x.id == me || g.o?.id == me
+                if (g.isRunning && iPlay) {
+                    box.addView(gameButton("Прервать игру", primary = false) { sendGame("end", g.id) })
+                }
+                if (g.isFinished) {
+                    box.addView(gameButton("Сыграть ещё") { sendGame("inv", newGameId()) })
+                }
+            }
+        }
+    }
+
+    /** Применяет игровое событие. Возвращает true, если о нём стоит напомнить значком на пузыре. */
+    private fun handleGameEvent(ev: TttProto.Event, live: Boolean): Boolean {
+        val change = ttt.apply(ev.type, ev.gid, ev.player, ev.cell)
+        val g = ttt.game
+        val mine = ev.player.id == prefs.playerId
+        var worthBadge = false
+
+        // Старые события (история при входе в комнату) только восстанавливают состояние, без сообщений и затемнения
+        if (live && g != null) {
+            when (change) {
+                TttChange.INVITED -> {
+                    if (mine) {
+                        addSystemLine("🎮 Ты предложил сыграть в крестики-нолики. Ждём соперника")
+                    } else {
+                        addSystemLine("🎮 ${ev.player.nick} предлагает сыграть в крестики-нолики. Нажми 🎮")
+                        worthBadge = true
+                    }
+                }
+                TttChange.ACCEPTED ->
+                    addSystemLine("🎮 Играют: ${g.x.nick} ✕ и ${ev.player.nick} ○")
+                TttChange.FINISHED -> {
+                    val loser = g.loser()
+                    val winner = g.winner()
+                    if (loser != null && winner != null) {
+                        addSystemLine(
+                            "🎮 Победил ${winner.nick}! ${loser.nick} ищет: экран потемнеет на ${mmss(Style.BLACKOUT_SEC)}"
+                        )
+                    } else {
+                        addSystemLine("🎮 Ничья!")
+                    }
+                }
+                TttChange.ABORTED -> addSystemLine("🎮 Игра прервана")
+                else -> {}
+            }
+        }
+
+        if (live && change == TttChange.FINISHED) {
+            val loser = g?.loser()
+            if (loser != null && loser.id == prefs.playerId) startBlackout()
+        }
+        if (gameMode) renderGame()
+        return worthBadge
+    }
+
+    private fun addSystemLine(s: String) {
+        val list = listLayout ?: return
+        val tv = TextView(this).apply {
+            text = s
+            textSize = Style.TEXT_SP - 1
+            setTextColor(Style.hintColor)
+            typeface = Typeface.create(Typeface.DEFAULT, Typeface.ITALIC)
+            setPadding(0, dp(3), 0, dp(3))
+        }
+        list.addView(tv)
+        while (list.childCount > 120) list.removeViewAt(0)
+        scroll?.post { scroll?.fullScroll(View.FOCUS_DOWN) }
+    }
+
+    /**
+     * Экран проигравшего темнеет на [Style.BLACKOUT_SEC] секунд: на весь экран ложится чёрное окно,
+     * которое не пропускает нажатия. Пока он «считает», остальные прячутся.
+     * Запасной выход: зажать экран на 5 секунд.
+     */
+    private fun startBlackout() {
+        if (blackout != null) return
+        releaseFocus()
+        val endAt = SystemClock.elapsedRealtime() + Style.BLACKOUT_SEC * 1000L
+
+        val root = FrameLayout(this).apply {
+            setBackgroundColor(Color.BLACK)
+            alpha = 0f
+        }
+        val tv = TextView(this).apply {
+            setTextColor(0xFF5A5A6E.toInt())
+            textSize = 20f
+            gravity = Gravity.CENTER
+        }
+        root.addView(tv, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
+        val hint = TextView(this).apply {
+            text = "Выйти раньше: зажми экран на 5 секунд"
+            setTextColor(0xFF3A3A48.toInt())
+            textSize = 12f
+            gravity = Gravity.CENTER
+        }
+        val hintLp = FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.BOTTOM,
+        )
+        hintLp.bottomMargin = dp(60)
+        root.addView(hint, hintLp)
+
+        val p = WindowManager.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            overlayType(),
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
+                WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS or
+                WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON,
+            PixelFormat.TRANSLUCENT,
+        )
+        p.gravity = Gravity.TOP or Gravity.START
+
+        root.setOnTouchListener { _, e ->
+            when (e.action) {
+                MotionEvent.ACTION_DOWN -> main.postDelayed(blackoutExit, 5000)
+                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> main.removeCallbacks(blackoutExit)
+            }
+            true
+        }
+
+        try {
+            wm.addView(root, p)
+        } catch (_: Exception) {
+            return
+        }
+        blackout = root
+        root.animate().alpha(1f).setDuration(1500).start() // экран плавно темнеет
+
+        val tick = object : Runnable {
+            override fun run() {
+                if (blackout !== root) return
+                val left = ((endAt - SystemClock.elapsedRealtime() + 999) / 1000).toInt()
+                if (left <= 0) {
+                    endBlackout()
+                    return
+                }
+                tv.text = "Ты проиграл, теперь ищешь!\n\nЭкран включится через ${mmss(left)}"
+                main.postDelayed(this, 500)
+            }
+        }
+        tick.run()
+    }
+
+    private fun endBlackout() {
+        val v = blackout ?: return
+        blackout = null
+        main.removeCallbacks(blackoutExit)
+        v.animate().cancel()
+        safeRemove(v)
+        toast("Экран включён. Иди искать!")
+    }
+
     private fun onIncoming(list: List<ChatMsg>) {
         val firstBatch = !historyLoaded
         historyLoaded = true
         var newFromOthers = 0
         for (m in list) {
+            val ev = TttProto.parse(m.text, m.nick)
+            if (ev != null) {
+                // игровое событие, в чате как текст не показываем
+                if (handleGameEvent(ev, live = !firstBatch)) newFromOthers++
+                continue
+            }
             addMessage(m)
             if (!firstBatch && m.nick != nick) newFromOthers++
         }

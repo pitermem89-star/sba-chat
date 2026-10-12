@@ -25,6 +25,11 @@ object Style {
         0xFFFF8A3D.toInt(), 0xFFFFD84D.toInt(), 0xFFFF6FB5.toInt(), 0xFFE8BA36.toInt(),
     )
 
+    // Крестики-нолики
+    val gameX = 0xFFFD2943.toInt()       // цвет крестика
+    val gameO = 0xFF01A2FF.toInt()       // цвет нолика
+    const val BLACKOUT_SEC = 90          // на сколько секунд темнеет экран проигравшего (90 = 1:30)
+
     // Размеры (в dp — условных пикселях)
     const val PANEL_W_DP = 300       // ширина окна чата
     const val PANEL_H_DP = 280       // высота окна чата

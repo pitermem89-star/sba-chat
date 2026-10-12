@@ -91,6 +91,17 @@ class Prefs(ctx: Context) {
     /** Ник игрока (до 20 символов). Пусто, если ещё не задан. */
     fun cleanNick(): String = nick.trim().take(20)
 
+    /** Уникальный код этой установки приложения. Нужен, чтобы в игре отличать игроков с одинаковыми никами. */
+    val playerId: String
+        get() {
+            var v = sp.getString("pid", null)
+            if (v == null) {
+                v = java.util.UUID.randomUUID().toString().replace("-", "").take(12)
+                sp.edit().putString("pid", v).apply()
+            }
+            return v
+        }
+
     // ------------------------------------------------------------ комнаты
 
     private fun toJson(r: Room): JSONObject =
