@@ -1,0 +1,7 @@
+# копируется из релиза tdlib-1.8.68 при сборке (см. build.yml)
+app/src/main/jniLibs/
+app/src/main/java/org/
+tdlib/
+tdlib.zip
+build/
+.gradle/

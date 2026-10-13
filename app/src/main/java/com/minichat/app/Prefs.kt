@@ -88,6 +88,20 @@ class Prefs(ctx: Context) {
         get() = sp.getInt("bubbleRoundPct", 100)
         set(v) { sp.edit().putInt("bubbleRoundPct", v).apply() }
 
+    /** Данные приложения Telegram с my.telegram.org. */
+    var tgApiId: Int
+        get() = sp.getInt("tgApiId", 0)
+        set(v) { sp.edit().putInt("tgApiId", v).apply() }
+
+    var tgApiHash: String
+        get() = sp.getString("tgApiHash", "") ?: ""
+        set(v) { sp.edit().putString("tgApiHash", v.trim()).apply() }
+
+    /** Ссылка на прокси (tg://proxy... или tg://socks...), если Telegram не подключается. */
+    var tgProxy: String
+        get() = sp.getString("tgProxy", "") ?: ""
+        set(v) { sp.edit().putString("tgProxy", v.trim()).apply() }
+
     /** Ник игрока (до 20 символов). Пусто, если ещё не задан. */
     fun cleanNick(): String = nick.trim().take(20)
 

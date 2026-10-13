@@ -23,6 +23,15 @@ jobs:
         with:
           gradle-version: 8.9
 
+      - name: Download TDLib (Telegram library)
+        run: |
+          curl -fsSL -o tdlib.zip https://github.com/pitermem89-star/sba-chat/releases/download/tdlib-1.8.68/tdlib.zip
+          unzip -q tdlib.zip
+          mkdir -p app/src/main/jniLibs app/src/main/java
+          cp -r tdlib/libs/* app/src/main/jniLibs/
+          cp -r tdlib/java/org app/src/main/java/
+          ls app/src/main/jniLibs/*
+
       - name: Build debug APK
         run: gradle assembleDebug --no-daemon
 

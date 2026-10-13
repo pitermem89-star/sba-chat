@@ -34,6 +34,9 @@ class MainActivity : Activity() {
     private lateinit var opacityLabel: TextView
     private lateinit var opacitySeek: SeekBar
     private lateinit var statusText: TextView
+    private lateinit var tgIdEdit: EditText
+    private lateinit var tgHashEdit: EditText
+    private lateinit var tgProxyEdit: EditText
 
     private var newPrivate = false
 
@@ -123,8 +126,28 @@ class MainActivity : Activity() {
             prefs.bubbleRoundPct = it
         }
 
-        // ---- 5. запуск
-        col.addView(section("5. Запуск"))
+        // ---- 5. Telegram
+        col.addView(section("5. Telegram (по желанию)"))
+        col.addView(
+            text(
+                "Нужны свои api_id и api_hash: зайди на my.telegram.org, войди по номеру, " +
+                    "открой «API development tools», создай приложение и перепиши два значения сюда. " +
+                    "Потом в окне чата нажми ✈ и войди по номеру телефона. " +
+                    "Если Telegram не подключается (в России его замедляют), вставь ссылку на прокси.",
+                13f, color = 0xFFB0B0C4.toInt(),
+            )
+        )
+        tgIdEdit = field("api_id (число)", if (prefs.tgApiId > 0) prefs.tgApiId.toString() else "")
+        tgIdEdit.inputType = InputType.TYPE_CLASS_NUMBER
+        col.addView(tgIdEdit)
+        tgHashEdit = field("api_hash", prefs.tgApiHash)
+        col.addView(tgHashEdit)
+        tgProxyEdit = field("Прокси: ссылка tg://proxy?… (необязательно)", prefs.tgProxy)
+        col.addView(tgProxyEdit)
+        col.addView(text("После смены этих полей нажми «Запустить чат» заново.", 13f, color = 0xFFB0B0C4.toInt()))
+
+        // ---- 6. запуск
+        col.addView(section("6. Запуск"))
         statusText = text("", 13f, color = 0xFFB0B0C4.toInt())
         col.addView(statusText)
         col.addView(button("Разрешить показ поверх приложений") { openOverlaySettings() })
@@ -242,6 +265,9 @@ class MainActivity : Activity() {
     private fun saveFields() {
         prefs.nick = nickEdit.text.toString().trim()
         prefs.opacity = opacitySeek.progress + 30
+        prefs.tgApiId = tgIdEdit.text.toString().trim().toIntOrNull() ?: 0
+        prefs.tgApiHash = tgHashEdit.text.toString()
+        prefs.tgProxy = tgProxyEdit.text.toString()
     }
 
     private fun refreshStatus() {

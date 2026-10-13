@@ -53,7 +53,7 @@ class PanelView(ctx: Context, private val onBack: () -> Unit) : LinearLayout(ctx
     }
 }
 
-class OverlayService : Service() {
+class OverlayService : Service(), TgHost {
 
     companion object {
         const val ACTION_STOP = "com.minichat.app.STOP"
@@ -110,6 +110,10 @@ class OverlayService : Service() {
     /** true, пока показан экран игры */
     private var gameMode = false
 
+    // Telegram
+    private var tgPanel: TgPanel? = null
+    private var tgMode = false
+
     /** Чёрный экран проигравшего (виден только пока он «ищет») */
     private var blackout: FrameLayout? = null
     private val blackoutExit = Runnable { endBlackout() }
@@ -146,6 +150,7 @@ class OverlayService : Service() {
         showBubble()
 
         if (prefs.currentRoom() != null) startClient()
+        try { tgPanel?.ensureStarted() } catch (_: Throwable) {}
 
         // Нет ника или комнаты — сразу открываем окно и просим выбрать
         if (nick.isEmpty() || prefs.currentRoom() == null) {
@@ -168,6 +173,7 @@ class OverlayService : Service() {
         gen++
         client?.stop()
         main.removeCallbacksAndMessages(null)
+        tgPanel?.destroy()
         safeRemove(bubble)
         safeRemove(panel)
         safeRemove(blackout)
@@ -227,7 +233,7 @@ class OverlayService : Service() {
             cornerRadius = dp(radiusDp).toFloat()
         }
 
-    private fun toast(s: String) {
+    private fun toastImpl(s: String) {
         Toast.makeText(this, s, Toast.LENGTH_SHORT).show()
     }
 
@@ -419,7 +425,7 @@ class OverlayService : Service() {
      * Чтобы клавиатура работала в окне поверх приложений, окно должно уметь получать фокус.
      * Обычно оно «не фокусируемое» (игра продолжает получать нажатия), а при касании поля — включаем фокус.
      */
-    private fun attachFocus(et: EditText) {
+    private fun attachFocusImpl(et: EditText) {
         et.setOnTouchListener { _, e ->
             if (e.action == MotionEvent.ACTION_DOWN) setPanelFocusable(true)
             if (e.action == MotionEvent.ACTION_UP) {
@@ -529,17 +535,23 @@ class OverlayService : Service() {
         gameBox = gb
         gameScroll = gs
 
+        // --- экран Telegram (скрыт, пока не нажали ✈)
+        val tp = TgPanel(this, prefs, this)
+        tp.root.visibility = View.GONE
+        root.addView(tp.root, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
+        tgPanel = tp
+
         // поля формы «создать или войти» (создаются один раз, чтобы не терять набранный текст)
         val nameEt = makeEdit("Название комнаты", 30)
         nameEt.inputType = InputType.TYPE_CLASS_TEXT
-        attachFocus(nameEt)
+        attachFocusImpl(nameEt)
         newRoomName = nameEt
 
         val passEt = makeEdit("Пароль комнаты", 40)
         passEt.inputType = InputType.TYPE_CLASS_TEXT or
             InputType.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD or
             InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
-        attachFocus(passEt)
+        attachFocusImpl(passEt)
         newRoomPass = passEt
 
         val doneListener = TextView.OnEditorActionListener { _, actionId, ev ->
@@ -583,6 +595,14 @@ class OverlayService : Service() {
             gravity = Gravity.CENTER
             setOnClickListener { toggleGame() }
         }
+        val tgBtn = TextView(this).apply {
+            text = "✈"
+            textSize = 18f
+            gravity = Gravity.CENTER
+            setTextColor(Style.textColor)
+            setOnClickListener { toggleTelegram() }
+        }
+        row.addView(tgBtn, LinearLayout.LayoutParams(dp(34), dp(38)))
         row.addView(gameBtn, LinearLayout.LayoutParams(dp(34), dp(38)))
         row.addView(et, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
         edit = et
@@ -605,7 +625,7 @@ class OverlayService : Service() {
         root.addView(row, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
         inputRow = row
 
-        attachFocus(et)
+        attachFocusImpl(et)
         et.setOnEditorActionListener { _, actionId, ev ->
             if (actionId == EditorInfo.IME_ACTION_SEND ||
                 (ev != null && ev.keyCode == KeyEvent.KEYCODE_ENTER && ev.action == KeyEvent.ACTION_DOWN)
@@ -653,7 +673,7 @@ class OverlayService : Service() {
     }
 
     /** Закрыть клавиатуру и вернуть управление игре. */
-    private fun releaseFocus() {
+    override fun releaseFocus() {
         // Передумали менять ник — отменяем. (Если ника ещё нет, режим ввода ника остаётся.)
         if (nickMode && nick.isNotEmpty()) finishNickEntry()
         val et = edit
@@ -682,11 +702,63 @@ class OverlayService : Service() {
     private fun collapse() {
         if (!expanded) return
         releaseFocus()
+        if (tgMode) closeTelegram()
         expanded = false
         safeRemove(panel)
         focusable = false
         showBubble()
     }
+
+    // ---------------------------------------------------------------- Telegram
+
+    private fun toggleTelegram() {
+        if (tgMode) {
+            closeTelegram()
+        } else {
+            if (!expanded) expand()
+            releaseFocus()
+            if (roomsMode) {
+                roomsMode = false
+                roomsScroll?.visibility = View.GONE
+            }
+            if (gameMode) {
+                gameMode = false
+                gameScroll?.visibility = View.GONE
+            }
+            tgMode = true
+            scroll?.visibility = View.GONE
+            inputRow?.visibility = View.GONE
+            tgPanel?.show()
+        }
+    }
+
+    /** Прячет экран Telegram без возврата к чату (его место займёт другой экран). */
+    private fun leaveTgUi() {
+        tgMode = false
+        tgPanel?.hide()
+    }
+
+    override fun closeTelegram() {
+        if (!tgMode) return
+        leaveTgUi()
+        releaseFocus()
+        scroll?.visibility = View.VISIBLE
+        inputRow?.visibility = View.VISIBLE
+        scroll?.post { scroll?.fullScroll(View.FOCUS_DOWN) }
+    }
+
+    override fun incoming() {
+        main.post {
+            if (!expanded) {
+                unread++
+                updateBadge()
+            }
+        }
+    }
+
+    override fun attachFocus(et: EditText) = attachFocusImpl(et)
+
+    override fun toast(s: String) = toastImpl(s)
 
     // ---------------------------------------------------------------- экран комнат
 
@@ -723,6 +795,7 @@ class OverlayService : Service() {
     private fun showRooms() {
         if (!expanded) expand()
         releaseFocus()
+        if (tgMode) leaveTgUi()
         if (gameMode) {
             gameMode = false
             gameScroll?.visibility = View.GONE
@@ -891,6 +964,7 @@ class OverlayService : Service() {
     private fun startNickEntry() {
         val et = edit ?: return
         if (!expanded) expand()
+        if (tgMode) leaveTgUi()
         if (roomsMode) hideRooms()
         if (gameMode) hideGame()
         nickMode = true
@@ -945,6 +1019,7 @@ class OverlayService : Service() {
     private fun showGame() {
         if (!expanded) expand()
         releaseFocus()
+        if (tgMode) leaveTgUi()
         if (roomsMode) {
             roomsMode = false
             roomsScroll?.visibility = View.GONE
